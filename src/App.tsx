@@ -224,6 +224,9 @@ export default function App() {
 
       let stream: MediaStream;
       if (type === "system") {
+        if (!navigator.mediaDevices.getDisplayMedia) {
+          throw new Error("System audio sharing is not supported on this device or browser. Please use a Desktop browser.");
+        }
         stream = await navigator.mediaDevices.getDisplayMedia({
           video: true,
           audio: {
@@ -234,18 +237,18 @@ export default function App() {
         });
       } else {
         stream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            echoCancellation: false,
-            noiseSuppression: false,
-            autoGainControl: false,
-          },
+          audio: true, // simplified constraints for better cross-device compatibility
         });
       }
 
       const audioTrack = stream.getAudioTracks()[0];
       if (!audioTrack) {
         stream.getTracks().forEach((t) => t.stop());
-        throw new Error("No audio track found.");
+        throw new Error(
+          type === "system" 
+            ? "No audio track found. Ensure you checked 'Share audio' or 'Share system audio' in the prompt!"
+            : "No microphone track found."
+        );
       }
 
       const audioOnlyStream = new MediaStream([audioTrack]);
@@ -270,7 +273,16 @@ export default function App() {
       };
     } catch (err: any) {
       console.error(err);
-      setError(err.message || "Failed to capture audio.");
+      if (
+        err.name === "NotAllowedError" ||
+        (err.message && err.message.includes("Permission denied"))
+      ) {
+        setError(
+          "Permission to access media was denied. If on mobile, ensure your browser has microphone permissions enabled in system settings."
+        );
+      } else {
+        setError(err.message || "Failed to capture audio.");
+      }
     }
   };
 
