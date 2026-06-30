@@ -12,7 +12,9 @@ import {
   Link2,
   Square,
   Copy,
-  CheckCircle2
+  CheckCircle2,
+  Share,
+  Download
 } from "lucide-react";
 
 export default function App() {
@@ -28,6 +30,7 @@ export default function App() {
   const [listenerCount, setListenerCount] = useState(0);
   const [volume, setVolume] = useState(1);
   const [copied, setCopied] = useState(false);
+  const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
 
   const localStreamRef = useRef<MediaStream | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -41,6 +44,29 @@ export default function App() {
   // Track listener connections
   const connectionsRef = useRef<Map<string, MediaConnection>>(new Map());
   const dataConnectionsRef = useRef<Map<string, DataConnection>>(new Map());
+
+  // Handle PWA installation prompt
+  useEffect(() => {
+    const handleBeforeInstallPrompt = (e: Event) => {
+      e.preventDefault();
+      setDeferredPrompt(e);
+    };
+
+    window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+    
+    return () => {
+      window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+    };
+  }, []);
+
+  const handleInstallClick = async () => {
+    if (!deferredPrompt) return;
+    deferredPrompt.prompt();
+    const { outcome } = await deferredPrompt.userChoice;
+    if (outcome === 'accepted') {
+      setDeferredPrompt(null);
+    }
+  };
 
   // Initialize PeerJS based on URL or manually
   useEffect(() => {
@@ -331,6 +357,23 @@ export default function App() {
     setTimeout(() => setCopied(false), 2000);
   };
 
+  const shareLink = async () => {
+    const url = `${window.location.origin}${window.location.pathname}?room=${peerId}`;
+    if (navigator.share) {
+      try {
+        await navigator.share({
+          title: 'Join my Audio Stream',
+          text: 'Listen to my real-time audio stream!',
+          url: url,
+        });
+      } catch (err) {
+        console.error("Share failed", err);
+      }
+    } else {
+      copyLink();
+    }
+  };
+
   const dismissError = () => setError(null);
 
   return (
@@ -367,6 +410,15 @@ export default function App() {
               </div>
             </div>
           </div>
+          {deferredPrompt && (
+            <button
+              onClick={handleInstallClick}
+              className="flex items-center px-4 py-2 bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-400 rounded-lg transition-colors text-sm font-medium"
+            >
+              <Download className="w-4 h-4 mr-2" />
+              Install App
+            </button>
+          )}
         </header>
 
         {error && (
@@ -414,10 +466,11 @@ export default function App() {
                     {`${window.location.origin}${window.location.pathname}?room=${peerId}`}
                  </div>
                  <button 
-                   onClick={copyLink}
-                   className="p-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg transition-colors flex-shrink-0"
+                   onClick={shareLink}
+                   className="p-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg transition-colors flex-shrink-0 flex items-center justify-center ml-2"
+                   title="Share or Copy Link"
                  >
-                   {copied ? <CheckCircle2 className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+                   {copied ? <CheckCircle2 className="w-4 h-4" /> : ('share' in navigator ? <Share className="w-4 h-4" /> : <Copy className="w-4 h-4" />)}
                  </button>
                </div>
             )}
