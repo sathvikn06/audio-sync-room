@@ -1,0 +1,6 @@
+{
+  "name": "Audio Sync Room",
+  "description": "Multi-device audio synchronization application for web, mobile, and desktop.",
+  "requestFramePermissions": ["microphone", "camera", "display-capture"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
