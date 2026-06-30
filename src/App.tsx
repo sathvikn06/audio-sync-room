@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef } from "react";
-import Peer, { MediaConnection } from "peerjs";
+import Peer, { MediaConnection, DataConnection } from "peerjs";
 import {
   Mic,
   MonitorUp,
@@ -25,14 +25,22 @@ export default function App() {
   const [isStreaming, setIsStreaming] = useState(false);
   const [isListening, setIsListening] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [listenerCount, setListenerCount] = useState(0);
+  const [volume, setVolume] = useState(1);
   const [copied, setCopied] = useState(false);
 
   const localStreamRef = useRef<MediaStream | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const peerRef = useRef<Peer | null>(null);
   
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const analyzerRef = useRef<AnalyserNode | null>(null);
+  const animationRef = useRef<number>(0);
+  
   // Track listener connections
   const connectionsRef = useRef<Map<string, MediaConnection>>(new Map());
+  const dataConnectionsRef = useRef<Map<string, DataConnection>>(new Map());
 
   // Initialize PeerJS based on URL or manually
   useEffect(() => {
@@ -76,16 +84,24 @@ export default function App() {
       console.log("New listener joined:", conn.peer);
       
       conn.on('open', () => {
+         dataConnectionsRef.current.set(conn.peer, conn);
          // When listener connects, if we are streaming, call them!
          if (localStreamRef.current) {
            const call = peer.call(conn.peer, localStreamRef.current);
            connectionsRef.current.set(conn.peer, call);
          }
+         setListenerCount(dataConnectionsRef.current.size);
       });
       
       conn.on('close', () => {
          console.log("Listener left:", conn.peer);
-         connectionsRef.current.delete(conn.peer);
+         dataConnectionsRef.current.delete(conn.peer);
+         const call = connectionsRef.current.get(conn.peer);
+         if (call) {
+           call.close();
+           connectionsRef.current.delete(conn.peer);
+         }
+         setListenerCount(dataConnectionsRef.current.size);
       });
     });
 
@@ -102,6 +118,7 @@ export default function App() {
             console.error("Autoplay prevented", e);
             setError("Autoplay blocked. Please click anywhere to enable audio.");
           });
+          setupVisualizer(remoteStream);
         }
       });
       
@@ -109,11 +126,94 @@ export default function App() {
         console.log("Host ended call");
         if (audioRef.current) audioRef.current.srcObject = null;
         setIsListening(false);
+        stopVisualizer();
       });
     });
 
     peerRef.current = peer;
   };
+
+  const setupVisualizer = (stream: MediaStream) => {
+    try {
+      const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
+      if (!audioContextRef.current) {
+        audioContextRef.current = new AudioContext();
+      }
+      
+      const ctx = audioContextRef.current;
+      if (ctx.state === 'suspended') {
+        ctx.resume();
+      }
+
+      if (analyzerRef.current) {
+        analyzerRef.current.disconnect();
+      }
+
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 256;
+      analyser.smoothingTimeConstant = 0.8;
+      
+      const source = ctx.createMediaStreamSource(stream);
+      source.connect(analyser);
+      
+      analyzerRef.current = analyser;
+      drawVisualizer();
+    } catch (e) {
+      console.error("Visualizer setup failed:", e);
+    }
+  };
+
+  const drawVisualizer = () => {
+    if (!canvasRef.current || !analyzerRef.current) return;
+    
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    
+    const analyser = analyzerRef.current;
+    const bufferLength = analyser.frequencyBinCount;
+    const dataArray = new Uint8Array(bufferLength);
+    
+    const draw = () => {
+      animationRef.current = requestAnimationFrame(draw);
+      
+      analyser.getByteFrequencyData(dataArray);
+      
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      
+      const barWidth = (canvas.width / bufferLength) * 2.5;
+      let barHeight;
+      let x = 0;
+      
+      for(let i = 0; i < bufferLength; i++) {
+        barHeight = dataArray[i] / 2;
+        
+        ctx.fillStyle = `rgb(99, 102, 241, ${barHeight / 128})`;
+        ctx.fillRect(x, canvas.height - barHeight, barWidth, barHeight);
+        
+        x += barWidth + 1;
+      }
+    };
+    
+    draw();
+  };
+
+  const stopVisualizer = () => {
+    if (animationRef.current) {
+      cancelAnimationFrame(animationRef.current);
+    }
+    if (canvasRef.current) {
+       const ctx = canvasRef.current.getContext('2d');
+       if (ctx) ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
+    }
+  };
+
+  // Handle audio volume
+  useEffect(() => {
+    if (audioRef.current) {
+      audioRef.current.volume = volume;
+    }
+  }, [volume]);
 
   // Start capturing media and streaming
   const startStreaming = async (type: "system" | "mic") => {
@@ -150,6 +250,7 @@ export default function App() {
 
       const audioOnlyStream = new MediaStream([audioTrack]);
       localStreamRef.current = audioOnlyStream;
+      setupVisualizer(audioOnlyStream);
       setIsStreaming(true);
       setError(null);
 
@@ -157,9 +258,11 @@ export default function App() {
       if (!peerRef.current || !isHost) {
         initializePeer(true);
       } else {
-        // We already have listeners waiting (maybe), call them!
-        // We need to know who is waiting. PeerJS doesn't track idle data connections easily 
-        // unless we store them. Wait, if we stream first, then listeners join, it's easier.
+        // We already have listeners waiting, call them!
+        dataConnectionsRef.current.forEach((conn, peerId) => {
+           const call = peerRef.current!.call(peerId, localStreamRef.current!);
+           connectionsRef.current.set(peerId, call);
+        });
       }
 
       audioTrack.onended = () => {
@@ -177,6 +280,7 @@ export default function App() {
       localStreamRef.current = null;
     }
     setIsStreaming(false);
+    stopVisualizer();
 
     // Close all active calls
     connectionsRef.current.forEach((call) => call.close());
@@ -244,7 +348,7 @@ export default function App() {
                     <span>•</span>
                     <span className="flex items-center text-indigo-300">
                       <Crown className="w-3.5 h-3.5 mr-1" />
-                      Broadcasting
+                      Broadcasting ({listenerCount} listener{listenerCount !== 1 ? 's' : ''})
                     </span>
                   </>
                 )}
@@ -273,6 +377,13 @@ export default function App() {
           )}
 
           <div className="relative z-10 flex flex-col items-center text-center space-y-8">
+            <canvas 
+               ref={canvasRef} 
+               width={300} 
+               height={100} 
+               className="w-full max-w-sm h-24 rounded-lg mix-blend-screen opacity-80" 
+             />
+
             <div className="space-y-2">
               <h2 className="text-2xl font-medium text-neutral-100">
                 {isHost ? "You are the Broadcaster" : isListening ? "Listening to Stream" : "Join or Start a Stream"}
@@ -357,9 +468,39 @@ export default function App() {
                       </div>
                     </div>
                   ) : (
-                    <div className="flex items-center px-8 py-4 bg-neutral-800 text-emerald-400 border border-neutral-700 rounded-xl font-medium w-full sm:w-auto justify-center">
-                      <Volume2 className="w-5 h-5 mr-2 animate-pulse" />
-                      Receiving Audio...
+                    <div className="flex flex-col items-center space-y-4 w-full sm:w-auto">
+                      <div className="flex items-center px-8 py-4 bg-neutral-800 text-emerald-400 border border-neutral-700 rounded-xl font-medium w-full justify-center shadow-inner">
+                        <Volume2 className="w-5 h-5 mr-2 animate-pulse" />
+                        Receiving Audio...
+                      </div>
+                      
+                      {/* Volume Slider */}
+                      <div className="flex items-center w-full px-4 py-3 bg-neutral-900 border border-neutral-800 rounded-lg">
+                        <Volume2 className="w-4 h-4 text-neutral-500 mr-3 flex-shrink-0" />
+                        <input 
+                          type="range" 
+                          min="0" max="1" step="0.01" 
+                          value={volume} 
+                          onChange={e => setVolume(parseFloat(e.target.value))} 
+                          className="w-full accent-indigo-500 h-1.5 bg-neutral-800 rounded-lg appearance-none cursor-pointer"
+                        />
+                      </div>
+                      
+                      <button 
+                        onClick={() => {
+                          setIsListening(false);
+                          if (audioRef.current) audioRef.current.srcObject = null;
+                          if (peerRef.current) {
+                             peerRef.current.destroy(); // fully destroy and re-create if needed later
+                             peerRef.current = null;
+                          }
+                          stopVisualizer();
+                          setActiveRoomId(null);
+                        }}
+                        className="text-sm text-neutral-400 hover:text-white transition-colors py-2"
+                      >
+                        Leave Room
+                      </button>
                     </div>
                   )}
                 </>
