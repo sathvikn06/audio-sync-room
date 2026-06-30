@@ -14,7 +14,8 @@ import {
   Copy,
   CheckCircle2,
   Share,
-  Download
+  Download,
+  FileAudio
 } from "lucide-react";
 
 export default function App() {
@@ -31,9 +32,13 @@ export default function App() {
   const [volume, setVolume] = useState(1);
   const [copied, setCopied] = useState(false);
   const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
+  const [supportsSystemAudio, setSupportsSystemAudio] = useState(true);
+  const [showAudioPrompt, setShowAudioPrompt] = useState(false);
 
   const localStreamRef = useRef<MediaStream | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const fileAudioRef = useRef<HTMLAudioElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const peerRef = useRef<Peer | null>(null);
   
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -44,6 +49,13 @@ export default function App() {
   // Track listener connections
   const connectionsRef = useRef<Map<string, MediaConnection>>(new Map());
   const dataConnectionsRef = useRef<Map<string, DataConnection>>(new Map());
+
+  // Check for System Audio Support
+  useEffect(() => {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+      setSupportsSystemAudio(false);
+    }
+  }, []);
 
   // Handle PWA installation prompt
   useEffect(() => {
@@ -241,6 +253,56 @@ export default function App() {
     }
   }, [volume]);
 
+  const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    try {
+      const url = URL.createObjectURL(file);
+      const audio = new Audio(url);
+      audio.loop = true; // Loop by default
+      fileAudioRef.current = audio;
+
+      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+      const ctx = new AudioContextClass();
+      if (ctx.state === 'suspended') {
+        await ctx.resume();
+      }
+      const source = ctx.createMediaElementSource(audio);
+      const destination = ctx.createMediaStreamDestination();
+      
+      source.connect(destination);
+      source.connect(ctx.destination); // Play locally as well
+
+      await audio.play();
+
+      const audioTrack = destination.stream.getAudioTracks()[0];
+      if (!audioTrack) throw new Error("Could not extract audio track from file.");
+
+      const audioOnlyStream = new MediaStream([audioTrack]);
+      localStreamRef.current = audioOnlyStream;
+      setupVisualizer(audioOnlyStream);
+      setIsStreaming(true);
+      setError(null);
+
+      if (!peerRef.current || !isHost) {
+        initializePeer(true);
+      } else {
+        dataConnectionsRef.current.forEach((conn, peerId) => {
+           const call = peerRef.current!.call(peerId, localStreamRef.current!);
+           connectionsRef.current.set(peerId, call);
+        });
+      }
+
+      audioTrack.onended = () => {
+        stopStreaming();
+      };
+    } catch (err: any) {
+      console.error(err);
+      setError("Failed to stream audio file: " + err.message);
+    }
+  };
+
   // Start capturing media and streaming
   const startStreaming = async (type: "system" | "mic") => {
     try {
@@ -251,7 +313,7 @@ export default function App() {
       let stream: MediaStream;
       if (type === "system") {
         if (!navigator.mediaDevices.getDisplayMedia) {
-          throw new Error("System audio sharing is not supported on this device or browser. Please use a Desktop browser.");
+          throw new Error("System audio sharing is not supported on this device or browser.");
         }
         stream = await navigator.mediaDevices.getDisplayMedia({
           video: true,
@@ -313,6 +375,12 @@ export default function App() {
   };
 
   const stopStreaming = () => {
+    if (fileAudioRef.current) {
+      fileAudioRef.current.pause();
+      fileAudioRef.current.src = "";
+      fileAudioRef.current = null;
+    }
+
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach((t) => t.stop());
       localStreamRef.current = null;
@@ -385,6 +453,62 @@ export default function App() {
     }}>
       <audio ref={audioRef} autoPlay />
 
+      {/* PWA Install Popup */}
+      {deferredPrompt && (
+        <div className="fixed bottom-4 left-4 right-4 md:bottom-8 md:left-auto md:right-8 md:w-96 bg-neutral-900 border border-indigo-500/30 p-4 rounded-2xl shadow-2xl z-50 flex items-start space-x-4 animate-in slide-in-from-bottom-5">
+          <div className="p-3 bg-indigo-500/20 rounded-xl text-indigo-400 flex-shrink-0">
+            <Download className="w-6 h-6" />
+          </div>
+          <div className="flex-1">
+            <h3 className="text-white font-medium mb-1">Install AudioSync</h3>
+            <p className="text-neutral-400 text-sm mb-3">Install this app on your device for quick access and better performance.</p>
+            <div className="flex space-x-3">
+              <button
+                onClick={handleInstallClick}
+                className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-sm font-medium transition-colors"
+              >
+                Install Now
+              </button>
+              <button
+                onClick={() => setDeferredPrompt(null)}
+                className="px-4 py-2 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded-lg text-sm font-medium transition-colors"
+              >
+                Later
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Audio Sharing Permission Prompt */}
+      {showAudioPrompt && (
+        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
+          <div className="bg-neutral-900 border border-neutral-800 rounded-2xl max-w-md w-full p-6 shadow-2xl animate-in fade-in zoom-in-95">
+            <h3 className="text-xl font-medium text-white mb-2">Share Audio Permissions</h3>
+            <p className="text-neutral-400 text-sm mb-6 leading-relaxed">
+              You will be prompted by your browser to choose what to share. To share audio from other apps, please ensure you select 'Entire Screen' or 'Tab' and explicitly check the 'Share system audio' or 'Also share tab audio' checkbox. Note: System audio sharing may not be supported on all mobile browsers.
+            </p>
+            <div className="flex justify-end space-x-3">
+              <button 
+                onClick={() => setShowAudioPrompt(false)}
+                className="px-4 py-2 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded-lg text-sm font-medium transition-colors"
+              >
+                Cancel
+              </button>
+              <button 
+                onClick={() => {
+                  setShowAudioPrompt(false);
+                  startStreaming("system");
+                }}
+                className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-sm font-medium transition-colors"
+              >
+                Proceed & Allow
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="max-w-2xl mx-auto space-y-8 mt-10">
         <header className="flex items-center justify-between border-b border-neutral-800 pb-6">
           <div className="flex items-center space-x-3">
@@ -410,15 +534,6 @@ export default function App() {
               </div>
             </div>
           </div>
-          {deferredPrompt && (
-            <button
-              onClick={handleInstallClick}
-              className="flex items-center px-4 py-2 bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-400 rounded-lg transition-colors text-sm font-medium"
-            >
-              <Download className="w-4 h-4 mr-2" />
-              Install App
-            </button>
-          )}
         </header>
 
         {error && (
@@ -517,11 +632,11 @@ export default function App() {
                       {/* Create New */}
                       <div className="flex flex-col space-y-2">
                         <button
-                          onClick={() => startStreaming("system")}
+                          onClick={() => setShowAudioPrompt(true)}
                           className="flex items-center justify-center px-6 py-2.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-200 rounded-lg border border-neutral-700 transition-colors text-sm"
                         >
                           <MonitorUp className="w-4 h-4 mr-2 text-indigo-400" />
-                          Share System Audio
+                          Share Other Apps Audio
                         </button>
                         <button
                           onClick={() => startStreaming("mic")}
@@ -530,6 +645,20 @@ export default function App() {
                           <Mic className="w-4 h-4 mr-2 text-indigo-400" />
                           Share Microphone
                         </button>
+                        <button
+                          onClick={() => fileInputRef.current?.click()}
+                          className="flex items-center justify-center px-6 py-2.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-200 rounded-lg border border-neutral-700 transition-colors text-sm"
+                        >
+                          <FileAudio className="w-4 h-4 mr-2 text-indigo-400" />
+                          Share Audio File
+                        </button>
+                        <input 
+                          type="file" 
+                          ref={fileInputRef} 
+                          accept="audio/*" 
+                          onChange={handleFileChange} 
+                          className="hidden" 
+                        />
                       </div>
                     </div>
                   ) : (
@@ -579,7 +708,7 @@ export default function App() {
             <strong className="text-neutral-300 font-medium">How to use (100% Client-Side):</strong>
           </p>
           <ul className="list-disc list-inside space-y-1 ml-1">
-            <li>On your Host device, click <strong className="text-neutral-300">Share System Audio</strong>.</li>
+            <li>On your Host device, click <strong className="text-neutral-300">Share System Audio</strong>, <strong className="text-neutral-300">Share Microphone</strong>, or <strong className="text-neutral-300">Share Audio File</strong>.</li>
             <li>Copy the generated Room Link.</li>
             <li>Open the link on your phone or other device.</li>
             <li>Audio will stream directly via WebRTC using PeerJS signaling! This works perfectly on serverless hosts like Vercel.</li>
